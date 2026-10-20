@@ -1,98 +1,129 @@
 @mode(host.dual)
 
-# Command-line parsing. Loup 1.26 has no CLI library, so arguments are
-# parsed by hand into an Options value.
+# Command-line parsing for findstr, with the shared Windows switch parser
+# (win/switches.loup) in its clustered form: `/SIN` is `/S /I /N`, as
+# findstr allows. Switches may come anywhere, in any case, with `/` or `-`;
+# a `/X` that findstr does not define is an operand (a path on Linux).
 #
-# Grammar: [OPTIONS] COMMAND [OPERANDS...]
-#   Options may appear anywhere before `--`; everything after `--` is an
-#   operand. Value options accept `--name VALUE` and `--name=VALUE`.
+# Operands: without /C: or /G:, the first one is the search strings
+# (separated by spaces) and the rest are file names; with /C: or /G:, every
+# operand is a file name.
 
-pub const DEFAULT_GREETING: string = "Hello";
+from win.switches import (SwitchSpec, flag, required_value, parse_switches);
 
-pub struct Options {
-    pub command: string;
-    pub operands: list[string];
-    pub help: bool;
-    pub version: bool;
-    pub verbose: bool;
-    pub shout: bool;
-    pub greeting: string;
+pub const MSG_BAD_COMMAND_LINE: string = "FINDSTR: Bad command line";
+
+# How search strings are read: /L, /R or neither (the later of /L and /R
+# wins).
+pub const MODE_DEFAULT: int = 0;
+pub const MODE_LITERAL: int = 1;
+pub const MODE_REGEX: int = 2;
+
+# The parsed command line. A class, not a struct: it crosses module
+# boundaries, and native builds can corrupt struct values that do so (see
+# AGENTS.md).
+pub class Options {
+    pub var help: bool = false;
+    pub var version: bool = false;
+    pub var at_begin: bool = false;        # /B
+    pub var at_end: bool = false;          # /E
+    pub var mode: int = MODE_DEFAULT;      # /L, /R
+    pub var subdirs: bool = false;         # /S
+    pub var ignore_case: bool = false;     # /I
+    pub var whole_line: bool = false;      # /X
+    pub var invert: bool = false;          # /V
+    pub var numbers: bool = false;         # /N
+    pub var names_only: bool = false;      # /M
+    pub var offsets: bool = false;         # /O
+    pub var printable_only: bool = false;  # /P
+    pub var literal_strings: list[string] = [];  # every /C:string
+    pub var string_files: list[string] = [];     # every /G:file
+    pub var list_files: list[string] = [];       # every /F:file
+    pub var has_strings_arg: bool = false;
+    pub var strings_arg: string = "";      # the space-separated search strings
+    pub var file_specs: list[string] = [];
+    pub var ignored: list[string] = [];    # /A and /D as typed: accepted, not implemented
 }
 
-pub func parse_args(argv: list[string]): Result[Options, string] {
-    var command = "";
-    var operands: list[string] = [];
-    var help = false;
-    var version = false;
-    var verbose = false;
-    var shout = false;
-    var greeting = DEFAULT_GREETING;
-    var only_operands = false;
+# The switches findstr declares.
+pub func findstr_switches(): list[SwitchSpec] {
+    return [
+        flag("B"), flag("E"), flag("L"), flag("R"), flag("S"), flag("I"), flag("X"),
+        flag("V"), flag("N"), flag("M"), flag("O"), flag("P"), flag("OFF"), flag("OFFLINE"),
+        required_value("C"), required_value("G"), required_value("F"),
+        required_value("A"), required_value("D"),
+    ];
+}
 
-    var i = 0;
-    while (i < argv.len()) {
-        let arg = argv[i];
-        i += 1;
-
-        if (only_operands or arg == "-" or !arg.startsWith("-")) {
-            if (command.is_empty()) {
-                command = arg;
-            } else {
-                operands.push(arg);
-            }
-            continue;
-        }
-        if (arg == "--") {
-            only_operands = true;
-            continue;
-        }
-
-        # Split `--name=value` into its name and inline value.
-        var name = arg;
-        var inline_value: Option[string] = None;
-        if (arg.startsWith("--") and arg.contains("=")) {
-            let parts = arg.split("=");
-            name = parts[0];
-            inline_value = Some(parts.slice(1).join("="));
-        }
-
-        if (name == "-g" or name == "--greeting") {
-            match inline_value {
-                Some(v) => { greeting = v; },
-                None => {
-                    if (i >= argv.len()) {
-                        return Err(i"option '{$ name $}' requires a value");
-                    }
-                    greeting = argv[i];
-                    i += 1;
-                },
-            }
-            continue;
-        }
-
-        if (inline_value.is_some()) {
-            return Err(i"option '{$ name $}' does not take a value");
-        }
-        if (name == "-h" or name == "--help") {
-            help = true;
-        } else if (name == "-V" or name == "--version") {
-            version = true;
-        } else if (name == "-v" or name == "--verbose") {
-            verbose = true;
-        } else if (name == "--shout") {
-            shout = true;
-        } else {
-            return Err(i"unknown option '{$ name $}'");
-        }
+# The statement form of `match` (arms that return) is deliberate: a match
+# expression whose arms build new values returns freed memory natively.
+pub safe func parse_args(argv: list[string]): Result[Options, string] {
+    let parsed = match parse_switches(argv, findstr_switches(), true) {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(MSG_BAD_COMMAND_LINE);
+        },
+    };
+    let opts = Options();
+    opts.help = parsed.help;
+    opts.version = parsed.version;
+    if (opts.help or opts.version) {
+        return Ok(opts);
     }
 
-    return Ok(Options(
-        command = command,
-        operands = operands,
-        help = help,
-        version = version,
-        verbose = verbose,
-        shout = shout,
-        greeting = greeting,
-    ));
+    for (sw in parsed.switches) {
+        let name = sw.name;
+        if (name == "B") {
+            opts.at_begin = true;
+        } else if (name == "E") {
+            opts.at_end = true;
+        } else if (name == "L") {
+            opts.mode = MODE_LITERAL;
+        } else if (name == "R") {
+            opts.mode = MODE_REGEX;
+        } else if (name == "S") {
+            opts.subdirs = true;
+        } else if (name == "I") {
+            opts.ignore_case = true;
+        } else if (name == "X") {
+            opts.whole_line = true;
+        } else if (name == "V") {
+            opts.invert = true;
+        } else if (name == "N") {
+            opts.numbers = true;
+        } else if (name == "M") {
+            opts.names_only = true;
+        } else if (name == "O") {
+            opts.offsets = true;
+        } else if (name == "P") {
+            opts.printable_only = true;
+        } else if (name == "C") {
+            opts.literal_strings.push(sw.value);
+        } else if (name == "G") {
+            opts.string_files.push(sw.value);
+        } else if (name == "F") {
+            opts.list_files.push(sw.value);
+        } else if (name == "A" or name == "D") {
+            opts.ignored.push(sw.text);
+        }
+        # /OFF and /OFFLINE: nothing to do (Linux has no offline attribute).
+    }
+
+    var first_file = 0;
+    if (opts.literal_strings.len() == 0 and opts.string_files.len() == 0) {
+        if (parsed.operands.len() == 0) {
+            return Err(MSG_BAD_COMMAND_LINE);
+        }
+        let strings = parsed.operands[0];
+        if (strings.replace(" ", "").len() == 0) {
+            return Err(MSG_BAD_COMMAND_LINE);
+        }
+        opts.has_strings_arg = true;
+        opts.strings_arg = strings;
+        first_file = 1;
+    }
+    for (i in first_file..parsed.operands.len()) {
+        opts.file_specs.push(parsed.operands[i]);
+    }
+    return Ok(opts);
 }

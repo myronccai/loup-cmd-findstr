@@ -1,0 +1,123 @@
+@mode(host.dual)
+
+# Searching one input, output forms, and how search strings are collected.
+
+from debug.assert import (expect, expectEq);
+from io.fs import (createDir, writeText, removeDir, isDir);
+from cli.args import (parse_args);
+from commands.pattern import (text_bytes);
+from commands.searcher import (SearchString, Searcher, search_string, build_searcher);
+from commands.findstr import (SearchConfig, SearchResult, search_input, collect_strings);
+
+const TEXT: string = "Hello world\nhello there\r\nother\n\nlast hello";
+
+func searcher_for(text: string, icase: bool): Searcher {
+    return build_searcher([search_string(text, false)], icase, false, false).unwrap();
+}
+
+safe func run_search(edits s: Searcher, cfg: SearchConfig, text: string, with_lines: bool): SearchResult {
+    let data = bytesFromInts(text_bytes(text));
+    var lines: list[string] = [];
+    if (with_lines) {
+        lines = text.split("\n");
+    }
+    return search_input(edits: s, cfg, data, lines);
+}
+
+func test_plain_search(): void {
+    let s = searcher_for("hello", false);
+    let cfg = SearchConfig();
+    let r = run_search(edits: s, cfg, TEXT, true);
+    expect(r.found, "found");
+    expectEq(r.out.len(), 2, "two lines");
+    expect(r.out[0] == "hello there\r", "line as stored, CR included");
+    expect(r.out[1] == "last hello", "last line without LF");
+}
+
+func test_prefixes(): void {
+    let s = searcher_for("hello", true);
+    let cfg = SearchConfig();
+    safe {
+        cfg.numbers = true;
+        cfg.offsets = true;
+        cfg.show_name = true;
+        cfg.label = "sub\\a.txt";
+    }
+    let r = run_search(edits: s, cfg, TEXT, true);
+    expectEq(r.out.len(), 3, "three lines with /I");
+    expect(r.out[0] == "sub\\a.txt:1:0:Hello world", "first");
+    expect(r.out[1] == "sub\\a.txt:2:12:hello there\r", "second");
+    expect(r.out[2] == "sub\\a.txt:5:32:last hello", "offset counts CR and empty line");
+}
+
+func test_invert(): void {
+    let s = searcher_for("hello", false);
+    let cfg = SearchConfig();
+    safe {
+        cfg.invert = true;
+        cfg.numbers = true;
+    }
+    let r = run_search(edits: s, cfg, TEXT, false);
+    expectEq(r.out.len(), 3, "three other lines");
+    expect(r.out[0] == "1:Hello world", "decoded from bytes");
+    expect(r.out[2] == "4:", "the empty line");
+}
+
+func test_names_only(): void {
+    let s = searcher_for("hello", false);
+    let cfg = SearchConfig();
+    safe {
+        cfg.names_only = true;
+        cfg.label = "a.txt";
+    }
+    let r = run_search(edits: s, cfg, TEXT, true);
+    expectEq(r.out.len(), 1, "one name");
+    expect(r.out[0] == "a.txt", "the name");
+    let none = run_search(edits: s, cfg, "nothing\n", true);
+    expect(!none.found and none.out.len() == 0, "no match, no name");
+}
+
+func test_empty_input(): void {
+    let s = searcher_for("x", false);
+    let cfg = SearchConfig();
+    let r = run_search(edits: s, cfg, "", true);
+    expect(!r.found and r.out.len() == 0, "no lines");
+    safe {
+        cfg.invert = true;
+    }
+    let one = run_search(edits: s, cfg, "\n", true);
+    expectEq(one.out.len(), 1, "one empty line");
+}
+
+func modes(argv: list[string]): string {
+    let strings = collect_strings(parse_args(argv).unwrap()).unwrap();
+    var out: list[string] = [];
+    for (s in strings) {
+        out.push((if (s.regex) { "R:" } else { "L:" }) + s.text);
+    }
+    return out.join(" ");
+}
+
+func test_default_mode_from_first_string(): void {
+    expect(modes(["51.4 200", "f"]) == "R:51.4 R:200", "first string is a regex");
+    expect(modes(["200 51.4", "f"]) == "L:200 L:51.4", "first string is plain");
+    expect(modes(["[x 1.2", "f"]) == "L:[x L:1.2", "an invalid first regex is plain");
+    expect(modes(["/C:a.b", "f"]) == "L:a.b", "/C: is literal");
+    expect(modes(["/R", "/C:a.b", "f"]) == "R:a.b", "/R /C:");
+    expect(modes(["/L", "a.b c", "f"]) == "L:a.b L:c", "/L");
+    expect(modes(["/R", "abc", "f"]) == "R:abc", "/R");
+}
+
+func test_strings_from_a_file(): void {
+    let root = "build/tmp/findstr_strings";
+    if (isDir(root)) {
+        removeDir(root);
+    }
+    createDir(root);
+    writeText(root + "/words.txt", "^start\r\n\nend.\n");
+    expect(modes(["/G:" + root + "/words.txt", "f"]) == "R:^start R:end.", "/G regexes");
+    expect(modes(["/L", "/G:" + root + "\\words.txt", "f"]) == "L:^start L:end.", "/G with /L");
+    let missing = collect_strings(parse_args(["/G:" + root + "/none.txt"]).unwrap());
+    expect(missing.unwrap_err() == "FINDSTR: Cannot read strings from build\\tmp\\findstr_strings\\none.txt", "message");
+    removeDir(root);
+}

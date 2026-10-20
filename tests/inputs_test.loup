@@ -1,0 +1,75 @@
+@mode(host.dual)
+
+# Inputs: list files, file specs with wildcards and /S, /P.
+
+from debug.assert import (expect, expectEq);
+from io.fs import (createDir, writeText, removeDir, isDir);
+from commands.pattern import (text_bytes);
+from commands.inputs import (list_lines, list_file_exists, read_list_file, resolve_spec, shows_names,
+    has_control_bytes);
+
+const ROOT: string = "build/tmp/findstr_inputs";
+
+func fresh_tree(): void {
+    if (isDir(ROOT)) {
+        removeDir(ROOT);
+    }
+    createDir(ROOT + "/sub/deep");
+    writeText(ROOT + "/a.txt", "a\n");
+    writeText(ROOT + "/b.log", "b\n");
+    writeText(ROOT + "/sub/c.txt", "c\n");
+    writeText(ROOT + "/sub/deep/a.txt", "deep\n");
+    writeText(ROOT + "/list.txt", "one\r\n\ntwo\n");
+}
+
+func test_list_lines(): void {
+    let lines = list_lines("one\r\n\ntwo\nthree");
+    expectEq(lines.len(), 3, "empty lines dropped");
+    expect(lines[0] == "one", "CR removed");
+    expect(lines[2] == "three", "last line without LF");
+    expectEq(list_lines("").len(), 0, "empty text");
+}
+
+func test_list_files(): void {
+    fresh_tree();
+    expect(list_file_exists(ROOT + "\\list.txt"), "backslashes");
+    expect(list_file_exists("/"), "/ is standard input");
+    expect(!list_file_exists(ROOT + "/none.txt"), "missing");
+    let entries = read_list_file(ROOT + "/list.txt");
+    expectEq(entries.len(), 2, "two entries");
+    expect(entries[1] == "two", "second entry");
+    removeDir(ROOT);
+}
+
+func test_resolve_spec(): void {
+    fresh_tree();
+    let plain = resolve_spec(ROOT + "\\a.txt", false);
+    expectEq(plain.len(), 1, "a plain name");
+    expect(plain[0] == ROOT + "/a.txt", "in fs form");
+    expectEq(resolve_spec(ROOT + "/missing.txt", false).len(), 1, "unchecked");
+    let wild = resolve_spec(ROOT + "/*.TXT", false);
+    expectEq(wild.len(), 2, "a.txt and list.txt");
+    expect(wild[0] == ROOT + "/a.txt", "sorted");
+    expectEq(resolve_spec(ROOT + "/*.none", false).len(), 0, "no match");
+    let deep = resolve_spec(ROOT + "/*.txt", true);
+    expectEq(deep.len(), 4, "/S finds four");
+    expect(deep[2] == ROOT + "/sub/c.txt", "subdirectories after the directory");
+    expect(deep[3] == ROOT + "/sub/deep/a.txt", "depth first");
+    let named = resolve_spec(ROOT + "/a.txt", true);
+    expectEq(named.len(), 2, "/S with a plain name");
+    expectEq(resolve_spec(ROOT + "/s*/a.txt", true).len(), 0, "wildcard in a directory");
+    removeDir(ROOT);
+}
+
+func test_shows_names(): void {
+    expect(!shows_names(["a.txt"], false), "one file");
+    expect(shows_names(["a.txt", "b.txt"], false), "two files");
+    expect(shows_names(["*.txt"], false), "a wildcard");
+    expect(shows_names(["a.txt"], true), "/S");
+}
+
+func test_control_bytes(): void {
+    expect(!has_control_bytes(bytesFromInts(text_bytes("tab\there\r\nff\n"))), "text");
+    expect(has_control_bytes(bytesFromInts([97, 0, 98])), "NUL");
+    expect(has_control_bytes(bytesFromInts([97, 27])), "ESC");
+}

@@ -1,0 +1,75 @@
+@mode(host.dual)
+
+# Which lines a set of search strings selects: a line is selected when any
+# search string matches it (before /V is applied).
+
+from commands.pattern import (Pattern, compile_regex, compile_literal, unescape_literal, text_bytes);
+
+# One search string and how to read it.
+pub class SearchString {
+    pub let text: string;
+    pub let regex: bool;
+
+    new(text: string, regex: bool) {
+        this.text = text;
+        this.regex = regex;
+    }
+}
+
+pub func search_string(text: string, regex: bool): SearchString {
+    return SearchString(text, regex);
+}
+
+pub class Searcher {
+    let patterns: list[Pattern];
+    let from_start: bool;          # /B (or /X)
+    let to_end: bool;              # /E (or /X)
+
+    new(patterns: list[Pattern], from_start: bool, to_end: bool) {
+        this.patterns = patterns;
+        this.from_start = from_start;
+        this.to_end = to_end;
+    }
+
+    # Whether the line `data[start:stop]` (without its line end) matches any
+    # search string.
+    pub modifier func selects(data: bytes, start: int, stop: int): bool {
+        for (p in this.patterns) {
+            var hit = false;
+            safe {
+                hit = p.search(data, start, stop, this.from_start, this.to_end);
+            }
+            if (hit) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    # The same for a line given as text (tests and callers without bytes).
+    pub modifier func selects_text(line: string): bool {
+        let data = bytesFromInts(text_bytes(line));
+        return this.selects(data, 0, data.len());
+    }
+}
+
+# Compiles the search strings. `from_start` and `to_end` come from /B, /E
+# and /X. Err(text) names a regular expression that cannot be compiled.
+pub func build_searcher(strings: list[SearchString], icase: bool, from_start: bool, to_end: bool): Result[Searcher, string] {
+    var patterns: list[Pattern] = [];
+    for (s in strings) {
+        if (s.regex) {
+            let compiled = compile_regex(s.text, icase);
+            if (compiled.is_err()) {
+                return Err(s.text);
+            }
+            patterns.push(compiled.unwrap());
+        } else {
+            let lit = unescape_literal(s.text);
+            if (lit.len() > 0) {
+                patterns.push(compile_literal(lit, icase));
+            }
+        }
+    }
+    return Ok(Searcher(patterns, from_start, to_end));
+}

@@ -1,0 +1,536 @@
+@mode(host.dual)
+
+# findstr's search strings: its small regular-expression dialect and its
+# literal strings, compiled to one form and matched by a matcher of its own
+# (no system.regex).
+#
+# The dialect: `.` any character, `*` the previous item repeated (zero or
+# more times), `^` and `$` the start and end of the line, `[abc]`, `[a-z]`
+# and `[^abc]` classes, `\<` and `\>` the start and end of a word, and `\x`
+# for a literal x. Everything else is a literal character, including
+# `+ ? ( ) { } |`.
+#
+# Like findstr, matching works on bytes: a line is a range of the file's
+# bytes, and a character outside ASCII is the sequence of its UTF-8 bytes.
+# A compiled pattern is a list of items (one byte, `.`, a class, or a
+# zero-width assertion), each possibly starred. Matching carries the set of
+# items reached along the line one byte at a time, so a search costs at
+# most (items x bytes) steps whatever the pattern, and allocates nothing.
+# See specs/findstr/design.md.
+
+# Item kinds. The ones below K_BOL consume one byte.
+pub const K_CHAR: int = 0;
+pub const K_ANY: int = 1;
+pub const K_CLASS: int = 2;
+pub const K_BOL: int = 3;
+pub const K_EOL: int = 4;
+pub const K_WORD_START: int = 5;
+pub const K_WORD_END: int = 6;
+
+const BACKSLASH: int = 92;
+const QUOTE: int = 34;
+
+# The code points of a string.
+pub func code_points(text: string): list[int] {
+    var out: list[int] = [];
+    for (c in text.scalars()) {
+        out.push(c.toInt());
+    }
+    return out;
+}
+
+# The UTF-8 bytes of one code point.
+pub func utf8_bytes(c: int): list[int] {
+    if (c < 128) {
+        return [c];
+    }
+    if (c < 2048) {
+        return [192 + c / 64, 128 + c % 64];
+    }
+    if (c < 65536) {
+        return [224 + c / 4096, 128 + (c / 64) % 64, 128 + c % 64];
+    }
+    return [240 + c / 262144, 128 + (c / 4096) % 64, 128 + (c / 64) % 64, 128 + c % 64];
+}
+
+# The UTF-8 bytes of a string, as ints.
+pub func text_bytes(text: string): list[int] {
+    var out: list[int] = [];
+    for (c in code_points(text)) {
+        for (b in utf8_bytes(c)) {
+            out.push(b);
+        }
+    }
+    return out;
+}
+
+# ASCII lower case (findstr's /I); other bytes are unchanged.
+pub func fold_byte(b: int): int {
+    if (b >= 65 and b <= 90) {
+        return b + 32;
+    }
+    return b;
+}
+
+# Word bytes for `\<` and `\>`: ASCII letters and digits, `_`, and every
+# byte of a non-ASCII character.
+pub func is_word_byte(b: int): bool {
+    return (b >= 48 and b <= 57) or (b >= 65 and b <= 90) or (b >= 97 and b <= 122)
+        or b == 95 or b >= 128;
+}
+
+# A compiled search string.
+pub class Pattern {
+    let kinds: list[int];
+    let vals: list[int];           # the byte (K_CHAR) or class index (K_CLASS)
+    let stars: list[bool];
+    let classes: list[list[int]];  # lo, hi pairs
+    let negated: list[bool];
+    let icase: bool;               # fold ASCII letters in the line (/I)
+    let plain: bool;               # only K_CHAR items, none starred
+    var reached: list[int];        # search state, reused from line to line
+
+    new(kinds: list[int], vals: list[int], stars: list[bool], classes: list[list[int]], negated: list[bool], icase: bool) {
+        this.kinds = kinds;
+        this.vals = vals;
+        this.stars = stars;
+        this.classes = classes;
+        this.negated = negated;
+        this.icase = icase;
+        var only_chars = true;
+        for (k in 0..kinds.len()) {
+            if (kinds[k] != K_CHAR or stars[k]) {
+                only_chars = false;
+            }
+        }
+        this.plain = only_chars;
+        var state: list[int] = [];
+        for (k in 0..(kinds.len() + 1)) {
+            state.push(-1);
+        }
+        this.reached = state;
+    }
+
+    # The number of items.
+    pub func size(): int {
+        return this.kinds.len();
+    }
+
+    # A readable form of the items, for tests: `a` for a byte (`#200` when
+    # not printable ASCII), `.`, `[97-122]`, `[^97-99]`, `^`, `$`, `\<`,
+    # `\>`, with `*` after starred items, separated by spaces.
+    pub func describe(): string {
+        var parts: list[string] = [];
+        for (k in 0..this.kinds.len()) {
+            let kind = this.kinds[k];
+            var piece = "";
+            if (kind == K_CHAR) {
+                let b = this.vals[k];
+                piece = if (b > 32 and b < 127) { str(char.of(b)) } else { "#" + str(b) };
+            } else if (kind == K_ANY) {
+                piece = ".";
+            } else if (kind == K_CLASS) {
+                let ranges = this.classes[this.vals[k]];
+                var members: list[string] = [];
+                var i = 0;
+                while (i < ranges.len()) {
+                    members.push(str(ranges[i]) + "-" + str(ranges[i + 1]));
+                    i += 2;
+                }
+                piece = (if (this.negated[this.vals[k]]) { "[^" } else { "[" }) + members.join(",") + "]";
+            } else if (kind == K_BOL) {
+                piece = "^";
+            } else if (kind == K_EOL) {
+                piece = "$";
+            } else if (kind == K_WORD_START) {
+                piece = "\\<";
+            } else {
+                piece = "\\>";
+            }
+            if (this.stars[k]) {
+                piece += "*";
+            }
+            parts.push(piece);
+        }
+        return parts.join(" ");
+    }
+
+    func accepts(k: int, b: int): bool {
+        let kind = this.kinds[k];
+        if (kind == K_CHAR) {
+            return this.vals[k] == b;
+        }
+        if (kind == K_ANY) {
+            return true;
+        }
+        let ranges = this.classes[this.vals[k]];
+        var hit = false;
+        var i = 0;
+        while (i < ranges.len()) {
+            if (b >= ranges[i] and b <= ranges[i + 1]) {
+                hit = true;
+                break;
+            }
+            i += 2;
+        }
+        return hit != this.negated[this.vals[k]];
+    }
+
+    func holds(kind: int, data: bytes, start: int, stop: int, at: int): bool {
+        if (kind == K_BOL) {
+            return at == start;
+        }
+        if (kind == K_EOL) {
+            return at == stop;
+        }
+        let before = at > start and is_word_byte(data[at - 1]);
+        let after = at < stop and is_word_byte(data[at]);
+        if (kind == K_WORD_START) {
+            return after and !before;
+        }
+        return before and !after;
+    }
+
+    func byte_at(data: bytes, at: int): int {
+        let b = data[at];
+        if (this.icase and b >= 65 and b <= 90) {
+            return b + 32;
+        }
+        return b;
+    }
+
+    # A pattern of plain bytes (every literal string): compare at each start.
+    func search_plain(data: bytes, start: int, stop: int, from_start: bool, to_end: bool): bool {
+        let m = this.kinds.len();
+        var first = start;
+        var last = stop - m;
+        if (from_start and last > start) {
+            last = start;
+        }
+        if (to_end) {
+            first = stop - m;
+        }
+        if (first < start) {
+            return false;
+        }
+        var s = first;
+        while (s <= last) {
+            var j = 0;
+            while (j < m and this.byte_at(data, s + j) == this.vals[j]) {
+                j += 1;
+            }
+            if (j == m) {
+                return true;
+            }
+            s += 1;
+        }
+        return false;
+    }
+
+    # Whether the pattern matches in the line `data[start:stop]` (without
+    # its line end). `from_start`: the match must begin at the start of the
+    # line (/B); `to_end`: it must finish at the end of the line (/E).
+    #
+    # `reached[k] == at` means that item k is reached with the line read up
+    # to byte `at`; `reached[size]` is the end of the pattern.
+    pub modifier func search(data: bytes, start: int, stop: int, from_start: bool, to_end: bool): bool {
+        if (this.plain) {
+            return this.search_plain(data, start, stop, from_start, to_end);
+        }
+        let p = this.kinds.len();
+        for (k in 0..(p + 1)) {
+            this.reached[k] = -1;
+        }
+        var at = start;
+        while (at <= stop) {
+            if (at == start or !from_start) {
+                this.reached[0] = at;
+            }
+            # Items that need no byte: skip a starred item, pass an
+            # assertion that holds here. Forward only, so one pass will do.
+            var live = false;
+            var k = 0;
+            while (k < p) {
+                if (this.reached[k] == at) {
+                    live = true;
+                    if (this.stars[k]) {
+                        this.reached[k + 1] = at;
+                    } else if (this.kinds[k] >= K_BOL and this.holds(this.kinds[k], data, start, stop, at)) {
+                        this.reached[k + 1] = at;
+                    }
+                }
+                k += 1;
+            }
+            if (this.reached[p] == at and (!to_end or at == stop)) {
+                return true;
+            }
+            if (at == stop or (!live and from_start)) {
+                return false;
+            }
+            # Read one byte. Backwards, so that each item is read before the
+            # item in front of it marks it for the next position.
+            let b = this.byte_at(data, at);
+            k = p - 1;
+            while (k >= 0) {
+                if (this.reached[k] == at and this.kinds[k] < K_BOL and this.accepts(k, b)) {
+                    if (this.stars[k]) {
+                        this.reached[k] = at + 1;
+                    } else {
+                        this.reached[k + 1] = at + 1;
+                    }
+                }
+                k -= 1;
+            }
+            at += 1;
+        }
+        return false;
+    }
+}
+
+# Collects the items of a pattern while it is compiled.
+class PatternBuilder {
+    pub var kinds: list[int] = [];
+    pub var vals: list[int] = [];
+    pub var stars: list[bool] = [];
+    pub var classes: list[list[int]] = [];
+    pub var negated: list[bool] = [];
+
+    pub modifier func add(kind: int, value: int): void {
+        this.kinds.push(kind);
+        this.vals.push(value);
+        this.stars.push(false);
+    }
+
+    # One character: its UTF-8 bytes, ASCII letters folded under /I.
+    pub modifier func add_char(c: int, icase: bool): void {
+        for (b in utf8_bytes(c)) {
+            this.add(K_CHAR, if (icase) { fold_byte(b) } else { b });
+        }
+    }
+
+    pub modifier func add_class(ranges: list[int], neg: bool): void {
+        this.classes.push(ranges);
+        this.negated.push(neg);
+        this.add(K_CLASS, this.classes.len() - 1);
+    }
+
+    # What a `*` here does: 1 repeats the last item (a byte, `.` or a
+    # class), 0 is ignored (`a**` is `a*`), -1 makes it a literal `*`
+    # (nothing to repeat).
+    pub func star_action(): int {
+        let n = this.kinds.len();
+        if (n == 0 or this.kinds[n - 1] >= K_BOL) {
+            return -1;
+        }
+        return if (this.stars[n - 1]) { 0 } else { 1 };
+    }
+
+    pub modifier func star_last(): void {
+        this.stars[this.stars.len() - 1] = true;
+    }
+
+    pub func build(icase: bool): Pattern {
+        return Pattern(this.kinds, this.vals, this.stars, this.classes, this.negated, icase);
+    }
+}
+
+# Adds the bytes lo..hi to a class, and under /I the lower-case forms of
+# its ASCII capitals (the line's capitals are folded before matching). A
+# character outside ASCII adds each of its UTF-8 bytes.
+func add_member(edits ranges: list[int], lo: int, hi: int, icase: bool): void {
+    if (lo >= 128 or hi >= 128) {
+        for (b in utf8_bytes(lo)) {
+            ranges.push(b);
+            ranges.push(b);
+        }
+        if (hi != lo) {
+            for (b in utf8_bytes(hi)) {
+                ranges.push(b);
+                ranges.push(b);
+            }
+        }
+        return;
+    }
+    if (lo > hi) {
+        return;
+    }
+    ranges.push(lo);
+    ranges.push(hi);
+    if (!icase) {
+        return;
+    }
+    let ulo = if (lo > 65) { lo } else { 65 };
+    let uhi = if (hi < 90) { hi } else { 90 };
+    if (ulo <= uhi) {
+        ranges.push(ulo + 32);
+        ranges.push(uhi + 32);
+    }
+}
+
+# Parses the class that starts after the `[` at codes[start] and adds it.
+# Returns the index just after its `]`, or -1 when there is no `]`.
+safe func parse_class(edits b: PatternBuilder, codes: list[int], start: int, icase: bool): int {
+    let n = codes.len();
+    var i = start;
+    var neg = false;
+    if (i < n and codes[i] == 94) {   # ^
+        neg = true;
+        i += 1;
+    }
+    var los: list[int] = [];
+    var his: list[int] = [];
+    var first = true;
+    var closed = false;
+    while (i < n) {
+        var c = codes[i];
+        if (c == 93 and !first) {     # ]
+            closed = true;
+            i += 1;
+            break;
+        }
+        first = false;
+        if (c == BACKSLASH and i + 1 < n) {
+            i += 1;
+            c = codes[i];
+        }
+        i += 1;
+        var hi = c;
+        # A range `x-y`, unless the `-` is the last character before `]`.
+        if (i + 1 < n and codes[i] == 45 and codes[i + 1] != 93) {
+            hi = codes[i + 1];
+            i += 2;
+            if (hi == BACKSLASH and i < n) {
+                hi = codes[i];
+                i += 1;
+            }
+        }
+        los.push(c);
+        his.push(hi);
+    }
+    if (!closed) {
+        return -1;
+    }
+    var ranges: list[int] = [];
+    for (m in 0..los.len()) {
+        add_member(edits: ranges, los[m], his[m], icase);
+    }
+    b.add_class(ranges, neg);
+    return i;
+}
+
+# Compiles a findstr regular expression. Err("") when it is not valid (an
+# unclosed `[`).
+pub safe func compile_regex(source: string, icase: bool): Result[Pattern, string] {
+    let codes = code_points(source);
+    let n = codes.len();
+    let b = PatternBuilder();
+    var i = 0;
+    while (i < n) {
+        let c = codes[i];
+        if (c == 46) {                          # .
+            b.add(K_ANY, 0);
+            i += 1;
+        } else if (c == 42) {                   # *
+            let action = b.star_action();
+            if (action > 0) {
+                b.star_last();
+            } else if (action < 0) {
+                b.add(K_CHAR, 42);
+            }
+            i += 1;
+        } else if (c == 94) {                   # ^
+            b.add(K_BOL, 0);
+            i += 1;
+        } else if (c == 36) {                   # $
+            b.add(K_EOL, 0);
+            i += 1;
+        } else if (c == 91) {                   # [
+            let next = parse_class(edits: b, codes, i + 1, icase);
+            if (next < 0) {
+                return Err("");
+            }
+            i = next;
+        } else if (c == BACKSLASH and i + 1 < n) {
+            let e = codes[i + 1];
+            if (e == 60) {                      # \<
+                b.add(K_WORD_START, 0);
+            } else if (e == 62) {               # \>
+                b.add(K_WORD_END, 0);
+            } else {
+                b.add_char(e, icase);
+            }
+            i += 2;
+        } else {
+            b.add_char(c, icase);
+            i += 1;
+        }
+    }
+    return Ok(b.build(icase));
+}
+
+# Compiles a literal search string (already unescaped): its bytes.
+pub safe func compile_literal(text: string, icase: bool): Pattern {
+    let b = PatternBuilder();
+    for (c in code_points(text)) {
+        b.add_char(c, icase);
+    }
+    return b.build(icase);
+}
+
+# Whether a search string counts as a regular expression when neither /L
+# nor /R is given: it has an unescaped special character (`. * ^ $ [`, or
+# `\<` / `\>`) and compiles.
+pub func looks_like_regex(text: string): bool {
+    let codes = code_points(text);
+    var special = false;
+    var i = 0;
+    while (i < codes.len()) {
+        let c = codes[i];
+        if (c == BACKSLASH) {
+            if (i + 1 < codes.len() and (codes[i + 1] == 60 or codes[i + 1] == 62)) {
+                special = true;
+            }
+            i += 2;
+            continue;
+        }
+        if (c == 46 or c == 42 or c == 94 or c == 36 or c == 91) {
+            special = true;
+        }
+        i += 1;
+    }
+    return special and compile_regex(text, false).is_ok();
+}
+
+# A literal search string as findstr reads it: `\\` stands for one
+# backslash and `\"` for a quote; any other backslash is itself.
+pub func unescape_literal(text: string): string {
+    if (text.index_of("\\") < 0) {
+        return text;
+    }
+    let codes = code_points(text);
+    var out: list[string] = [];
+    var i = 0;
+    while (i < codes.len()) {
+        let c = codes[i];
+        if (c == BACKSLASH and i + 1 < codes.len() and (codes[i + 1] == BACKSLASH or codes[i + 1] == QUOTE)) {
+            out.push(str(char.of(codes[i + 1])));
+            i += 2;
+        } else {
+            out.push(str(char.of(c)));
+            i += 1;
+        }
+    }
+    return out.join("");
+}
+
+# The search strings of the strings argument: separated by spaces, empty
+# ones dropped (`"hello  there"` is `hello` or `there`).
+pub func split_search_strings(text: string): list[string] {
+    var out: list[string] = [];
+    for (part in text.split(" ")) {
+        if (part.len() > 0) {
+            out.push(part);
+        }
+    }
+    return out;
+}

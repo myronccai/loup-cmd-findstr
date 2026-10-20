@@ -1,0 +1,87 @@
+@mode(host.dual)
+
+# Where findstr's input comes from: file specs (wildcards, /S), the list
+# files of /G: and /F:, and standard input.
+
+from io.fs import (isFile);
+from win.paths import (fs_path, parent_dir, base_name);
+from win.wildcard import (has_wildcards, expand, find_recursive, MATCH_FILES);
+
+pub const STDIN_PATH: string = "/dev/stdin";
+
+# The lines of a list file's text: line ends are LF or CR LF, and empty
+# lines are dropped.
+pub func list_lines(text: string): list[string] {
+    var out: list[string] = [];
+    for (line in text.split("\n")) {
+        var item = line;
+        if (item.endsWith("\r")) {
+            item = item.slice(0, item.len() - 1);
+        }
+        if (item.len() > 0) {
+            out.push(item);
+        }
+    }
+    return out;
+}
+
+# Whether the list file of /G: or /F: can be read: `/` means standard
+# input.
+pub func list_file_exists(name: string): bool {
+    return name == "/" or isFile(fs_path(name));
+}
+
+# The entries of a /G: or /F: list file (check list_file_exists first).
+pub func read_list_file(name: string): list[string] {
+    let path = if (name == "/") { STDIN_PATH } else { fs_path(name) };
+    return list_lines(readText(path));
+}
+
+# The files one file spec names, in fs form and search order:
+#
+# - with /S, every file under the spec's directory (and its subdirectories)
+#   whose name matches the spec's last component, wildcards or not;
+# - else, with a wildcard, the matching files of that directory;
+# - else the spec itself, unchecked (the caller reports a missing file).
+#
+# An empty list means nothing matched.
+pub func resolve_spec(spec: string, subdirs: bool): list[string] {
+    if (subdirs) {
+        let dir = parent_dir(spec);
+        if (has_wildcards(dir)) {
+            let none: list[string] = [];
+            return none;
+        }
+        return find_recursive(dir, base_name(spec), MATCH_FILES);
+    }
+    if (has_wildcards(spec)) {
+        return expand(spec, MATCH_FILES);
+    }
+    return [fs_path(spec)];
+}
+
+# Whether file names go before the lines: always with /S or a wildcard,
+# and when there is more than one file spec.
+pub func shows_names(specs: list[string], subdirs: bool): bool {
+    if (subdirs or specs.len() > 1) {
+        return true;
+    }
+    for (spec in specs) {
+        if (has_wildcards(spec)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+# Whether the data holds a control character other than tab, line feed,
+# form feed and carriage return (/P skips such files).
+pub func has_control_bytes(data: bytes): bool {
+    for (k in 0..data.len()) {
+        let b = data[k];
+        if (b < 32 and b != 9 and b != 10 and b != 12 and b != 13) {
+            return true;
+        }
+    }
+    return false;
+}

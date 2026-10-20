@@ -1,0 +1,165 @@
+@mode(host.dual)
+
+# findstr's regular expressions and literal strings: compiling, matching
+# and the rules for reading search strings.
+
+from debug.assert import (expect, expectEq);
+from commands.pattern import (compile_regex, compile_literal, text_bytes, utf8_bytes, fold_byte,
+    is_word_byte, looks_like_regex, unescape_literal, split_search_strings);
+
+func search_line(pattern: string, line: string, icase: bool, from_start: bool, to_end: bool): bool {
+    let p = compile_regex(pattern, icase).unwrap();
+    let data = bytesFromInts(text_bytes(line));
+    var hit = false;
+    safe {
+        hit = p.search(data, 0, data.len(), from_start, to_end);
+    }
+    return hit;
+}
+
+func finds(pattern: string, line: string): bool {
+    return search_line(pattern, line, false, false, false);
+}
+
+func describe(pattern: string): string {
+    return compile_regex(pattern, false).unwrap().describe();
+}
+
+func test_compiles_items(): void {
+    expect(describe("a.b*") == "a . b*", "chars, any, star");
+    expect(describe("^x$") == "^ x $", "anchors");
+    expect(describe("\\<w\\>") == "\\< w \\>", "word anchors");
+    expect(describe("[a-c_]") == "[97-99,95-95]", "class with a range");
+    expect(describe("[^0-9]*") == "[^48-57]*", "negated, starred class");
+    expect(describe("a+b?(c)") == "a + b ? ( c )", "other punctuation is literal");
+    expect(describe("\\.\\*\\[\\\\") == ". * [ \\", "escapes give literals");
+}
+
+func test_star_quirks(): void {
+    expect(describe("*a") == "* a", "a leading * is literal");
+    expect(describe("^*") == "^ *", "a * after ^ is literal");
+    expect(describe("a**") == "a*", "a** is a*");
+    expect(finds("*a", "x*a"), "literal * matches");
+    expect(!finds("*a", "xa"), "literal * is required");
+}
+
+func test_class_forms(): void {
+    expect(describe("[]a]") == "[93-93,97-97]", "] first is a member");
+    expect(describe("[a-]") == "[97-97,45-45]", "- last is a member");
+    expect(describe("[-a]") == "[45-45,97-97]", "- first is a member");
+    expect(describe("[\\]x]") == "[93-93,120-120]", "escaped ] in a class");
+    expect(describe("[z-a]") == "[]", "a reversed range is empty");
+    expect(compile_regex("[abc", false).is_err(), "unclosed class");
+    expect(compile_regex("[]", false).is_err(), "[] is unclosed");
+    expect(compile_regex("[^]", false).is_err(), "[^] is unclosed");
+}
+
+func test_matching(): void {
+    expect(finds("hel*o", "heo"), "zero repeats");
+    expect(finds("hel*o", "hellllo"), "many repeats");
+    expect(!finds("hel*o", "help"), "no match");
+    expect(finds("a.c", "abc"), "dot");
+    expect(!finds("a.c", "ac"), "dot needs a character");
+    expect(finds("x.*y", "x and y"), "dot star");
+    expect(finds("[0-9][0-9]*", "abc 42"), "digits");
+    expect(!finds("[0-9]", "abc"), "no digits");
+    expect(finds("[^a-z]", "abc!"), "negated class");
+    expect(!finds("[^a-z]", "abc"), "negated class, no match");
+    expect(finds("a*", ""), "a* matches an empty line");
+    expect(finds("", "anything"), "an empty pattern matches");
+}
+
+func test_anchors(): void {
+    expect(finds("^abc", "abcdef"), "^ at the start");
+    expect(!finds("^abc", "xabc"), "^ elsewhere");
+    expect(finds("def$", "abcdef"), "$ at the end");
+    expect(!finds("abc$", "abcdef"), "$ elsewhere");
+    expect(finds("^$", ""), "empty line");
+    expect(!finds("^$", " "), "not empty");
+    expect(!finds("a^b", "a^b"), "^ inside is an anchor");
+}
+
+func test_words(): void {
+    expect(finds("\\<the\\>", "in the end"), "a whole word");
+    expect(!finds("\\<the\\>", "other theme"), "inside words");
+    expect(finds("\\<the", "theme"), "start of a word");
+    expect(!finds("\\<the", "other"), "not the start");
+    expect(finds("her\\>", "other"), "end of a word");
+    expect(finds("\\<x", "x"), "start of the line");
+    expect(finds("\\<.", "  b"), "\\< before any character");
+    expect(!finds("\\<\\.", "a.b"), "a dot is not a word");
+    expect(finds("\\<_a", "-_a"), "_ is a word character");
+}
+
+func test_from_start_and_to_end(): void {
+    expect(search_line("ab*", "abbb", false, true, true), "/X whole line");
+    expect(!search_line("ab*", "abbbc", false, true, true), "/X not whole");
+    expect(search_line("b", "bc", false, true, false), "/B");
+    expect(!search_line("b", "ab", false, true, false), "/B elsewhere");
+    expect(search_line("b", "ab", false, false, true), "/E");
+    expect(!search_line("b", "ba", false, false, true), "/E elsewhere");
+    expect(search_line("c.*", "abc", false, false, true), "/E with a star");
+}
+
+func test_ignore_case(): void {
+    expect(search_line("hello", "HeLLo", true, false, false), "letters");
+    expect(search_line("HELLO", "hello", true, false, false), "upper-case pattern");
+    expect(search_line("[A-C]x", "zbX", true, false, false), "class range");
+    expect(!search_line("[^a]", "A", true, false, false), "negated class");
+    expect(!search_line("hello", "HELLO", false, false, false), "case matters without /I");
+}
+
+func test_bytes(): void {
+    expectEq(utf8_bytes(65).len(), 1, "ASCII");
+    expectEq(utf8_bytes(233)[0], 195, "é lead byte");
+    expectEq(utf8_bytes(233)[1], 169, "é second byte");
+    expectEq(utf8_bytes(8364).len(), 3, "euro sign");
+    expectEq(utf8_bytes(128512).len(), 4, "emoji");
+    expectEq(text_bytes("aé").len(), 3, "text bytes");
+    expectEq(fold_byte(65), 97, "A");
+    expectEq(fold_byte(97), 97, "a");
+    expectEq(fold_byte(200), 200, "not ASCII");
+    expect(is_word_byte(95) and is_word_byte(200) and !is_word_byte(32), "word bytes");
+    expect(finds("é", "café"), "a non-ASCII literal");
+    expect(!finds("caf.$", "café"), "a dot is one byte");
+    expect(finds("caf..$", "café"), "two dots for a two-byte character");
+}
+
+func test_literal(): void {
+    let p = compile_literal("a.b*", false);
+    expect(p.describe() == "a . b *", "no special characters");
+    let data = bytesFromInts(text_bytes("xA.B*y"));
+    let q = compile_literal("a.b*", true);
+    var hit = false;
+    safe {
+        hit = q.search(data, 0, data.len(), false, false);
+    }
+    expect(hit, "literal, /I");
+}
+
+func test_looks_like_regex(): void {
+    expect(looks_like_regex("51.4"), "dot");
+    expect(looks_like_regex("a*"), "star");
+    expect(looks_like_regex("^x"), "caret");
+    expect(looks_like_regex("x$"), "dollar");
+    expect(looks_like_regex("[ab]"), "class");
+    expect(looks_like_regex("\\<x"), "word start");
+    expect(!looks_like_regex("200"), "plain");
+    expect(!looks_like_regex("a\\.b"), "escaped dot");
+    expect(!looks_like_regex("[x"), "invalid");
+    expect(!looks_like_regex("a+b?"), "other punctuation");
+}
+
+func test_unescape_literal(): void {
+    expect(unescape_literal("a\\\\b") == "a\\b", "double backslash");
+    expect(unescape_literal("say \\\"hi\\\"") == "say \"hi\"", "quote");
+    expect(unescape_literal("c:\\dir") == "c:\\dir", "other backslashes");
+    expect(unescape_literal("plain") == "plain", "nothing to do");
+}
+
+func test_split_search_strings(): void {
+    let words = split_search_strings("  hello   there ");
+    expectEq(words.len(), 2, "two strings");
+    expect(words[0] == "hello" and words[1] == "there", "the strings");
+    expectEq(split_search_strings("one").len(), 1, "one string");
+}

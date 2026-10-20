@@ -1,54 +1,34 @@
 @mode(host.dual)
 
-from appinfo import (APP_NAME, EXIT_OK, EXIT_FAILURE, EXIT_USAGE);
-from cli.args import (Options, parse_args);
+from appinfo import (EXIT_FOUND, EXIT_ERROR);
+from cli.args import (parse_args);
 from cli.usage import (usage, version_line);
-from commands.hello import (run_hello);
+from commands.findstr import (run_findstr);
 
-# Parses argv, runs the selected command and returns the exit status.
+# Parses argv, runs findstr and returns the exit status (findstr's
+# ERRORLEVEL: 0 a line was printed, 1 none was, 2 a bad command line).
 pub func run(argv: list[string]): int {
     let opts = match parse_args(argv) {
         Ok(parsed) => parsed,
         Err(msg) => {
-            return usage_error(msg);
+            printErr(msg);
+            return EXIT_ERROR;
         },
     };
 
     if (opts.help) {
         println(usage());
-        return EXIT_OK;
+        return EXIT_FOUND;
     }
     if (opts.version) {
         println(version_line());
-        return EXIT_OK;
-    }
-    if (opts.verbose) {
-        printErr(i"{$ APP_NAME $}: command '{$ opts.command $}', operands {$ opts.operands $}");
+        return EXIT_FOUND;
     }
 
     try {
-        return dispatch(opts);
+        return run_findstr(opts);
     } catch (Exception as e) {
-        printErr(i"{$ APP_NAME $}: error: {$ e.message $}");
-        return EXIT_FAILURE;
+        printErr("FINDSTR: " + e.message);
+        return EXIT_ERROR;
     }
-}
-
-# Add new commands here and to the help text in cli/usage.loup.
-func dispatch(opts: Options): int {
-    return match opts.command {
-        "hello" => run_hello(opts),
-        "help" => {
-            println(usage());
-            EXIT_OK
-        },
-        "" => usage_error("no command given"),
-        other => usage_error(i"unknown command '{$ other $}'"),
-    };
-}
-
-func usage_error(msg: string): int {
-    printErr(i"{$ APP_NAME $}: {$ msg $}");
-    printErr(i"Try '{$ APP_NAME $} --help' for more information.");
-    return EXIT_USAGE;
 }

@@ -1,0 +1,64 @@
+@mode(host.dual)
+
+# Sets of search strings: any of them selects a line; /B, /E, /X, /I.
+
+from debug.assert import (expect);
+from commands.searcher import (SearchString, Searcher, search_string, build_searcher);
+
+safe func picks(edits s: Searcher, line: string): bool {
+    return s.selects_text(line);
+}
+
+func make(strings: list[SearchString], icase: bool, from_start: bool, to_end: bool): Searcher {
+    return build_searcher(strings, icase, from_start, to_end).unwrap();
+}
+
+func test_any_string_selects(): void {
+    let s = make([search_string("hello", false), search_string("there", false)], false, false, false);
+    expect(picks(edits: s, "hello world"), "first string");
+    expect(picks(edits: s, "over there"), "second string");
+    expect(!picks(edits: s, "nothing"), "neither");
+}
+
+func test_literal_and_regex_together(): void {
+    let s = make([search_string("a.c", false), search_string("x.z", true)], false, false, false);
+    expect(picks(edits: s, "a.c"), "literal dot");
+    expect(!picks(edits: s, "abc"), "literal dot is not a wildcard");
+    expect(picks(edits: s, "xyz"), "regex dot");
+}
+
+func test_literal_escapes(): void {
+    let s = make([search_string("a\\\\b", false)], false, false, false);
+    expect(picks(edits: s, "a\\b"), "\\\\ is one backslash");
+    expect(!picks(edits: s, "ab"), "the backslash is required");
+}
+
+func test_whole_line_and_ends(): void {
+    let x = make([search_string("end", false)], false, true, true);
+    expect(picks(edits: x, "end"), "/X equal");
+    expect(!picks(edits: x, "the end"), "/X longer line");
+    let b = make([search_string("the", false)], false, true, false);
+    expect(picks(edits: b, "the end"), "/B start");
+    expect(!picks(edits: b, "at the end"), "/B not at start");
+    let e = make([search_string("end", false)], false, false, true);
+    expect(picks(edits: e, "the end"), "/E end");
+    expect(!picks(edits: e, "endless"), "/E not at end");
+}
+
+func test_ignore_case(): void {
+    let s = make([search_string("Hello", false)], true, false, false);
+    expect(picks(edits: s, "say HELLO"), "/I literal");
+    let r = make([search_string("h[aeiou]llo", true)], true, false, false);
+    expect(picks(edits: r, "HELLO"), "/I regex");
+}
+
+func test_bad_regex(): void {
+    let r = build_searcher([search_string("[oops", true)], false, false, false);
+    expect(r.is_err(), "unclosed class");
+}
+
+func test_no_strings_select_nothing(): void {
+    let none: list[SearchString] = [];
+    let s = make(none, false, false, false);
+    expect(!picks(edits: s, "anything"), "nothing to find");
+}

@@ -1,25 +1,40 @@
 @mode(host.dual)
 
-# Exit statuses of the whole command line. These tests print the program's
+# ERRORLEVELs of whole command lines. These tests print the program's
 # normal output and error messages.
 
 from debug.assert import (expectEq);
-from appinfo import (EXIT_OK, EXIT_USAGE);
+from io.fs import (createDir, writeText, removeDir, isDir);
+from appinfo import (EXIT_FOUND, EXIT_NOT_FOUND, EXIT_ERROR);
 from cli.app import (run);
 
-func test_version_succeeds(): void {
-    expectEq(run(["--version"]), EXIT_OK, "--version");
+const ROOT: string = "build/tmp/findstr_app";
+
+func test_version_and_help(): void {
+    expectEq(run(["--version"]), EXIT_FOUND, "--version");
+    expectEq(run(["/?"]), EXIT_FOUND, "/?");
 }
 
-func test_hello_succeeds(): void {
-    expectEq(run(["hello", "tests"]), EXIT_OK, "hello NAME");
-}
-
-func test_unknown_command_is_usage_error(): void {
-    expectEq(run(["bogus"]), EXIT_USAGE, "unknown command");
-}
-
-func test_missing_command_is_usage_error(): void {
+func test_bad_command_line(): void {
     let none: list[string] = [];
-    expectEq(run(none), EXIT_USAGE, "no command");
+    expectEq(run(none), EXIT_ERROR, "nothing");
+    expectEq(run(["/N"]), EXIT_ERROR, "no strings");
+    expectEq(run(["/R", "[x", "a.txt"]), EXIT_ERROR, "bad regex");
+}
+
+func test_found_and_not_found(): void {
+    if (isDir(ROOT)) {
+        removeDir(ROOT);
+    }
+    createDir(ROOT);
+    writeText(ROOT + "/a.txt", "one\ntwo\n");
+    writeText(ROOT + "/b.txt", "three\n");
+    expectEq(run(["two", ROOT + "\\a.txt"]), EXIT_FOUND, "found");
+    expectEq(run(["four", ROOT + "/a.txt"]), EXIT_NOT_FOUND, "not found");
+    expectEq(run(["/V", "one two", ROOT + "/a.txt"]), EXIT_NOT_FOUND, "/V, every line matches");
+    expectEq(run(["/M", "three", ROOT + "/*.txt"]), EXIT_FOUND, "wildcard");
+    expectEq(run(["one", ROOT + "/missing.txt"]), EXIT_NOT_FOUND, "missing file");
+    expectEq(run(["one", ROOT + "/missing.txt", ROOT + "/a.txt"]), EXIT_FOUND, "missing and found");
+    expectEq(run(["/F:" + ROOT + "/none.txt", "x"]), EXIT_ERROR, "missing /F list");
+    removeDir(ROOT);
 }

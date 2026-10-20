@@ -1,0 +1,209 @@
+@mode(host.dual)
+
+# findstr itself: collect the search strings, decide literal or regular
+# expression, walk the inputs and print the selected lines. search_input
+# is pure (it returns the output lines); only run_findstr prints.
+
+from io.fs import (isFile);
+from appinfo import (EXIT_FOUND, EXIT_NOT_FOUND, EXIT_ERROR);
+from cli.args import (Options, MSG_BAD_COMMAND_LINE, MODE_DEFAULT, MODE_REGEX);
+from commands.pattern import (looks_like_regex, split_search_strings);
+from commands.searcher import (SearchString, Searcher, search_string, build_searcher);
+from commands.inputs import (STDIN_PATH, list_file_exists, read_list_file, resolve_spec, shows_names,
+    has_control_bytes);
+from win.paths import (display_path);
+
+# How one input is searched and printed. A class: it crosses module
+# boundaries.
+pub class SearchConfig {
+    pub var invert: bool = false;      # /V
+    pub var numbers: bool = false;     # /N
+    pub var offsets: bool = false;     # /O
+    pub var names_only: bool = false;  # /M
+    pub var show_name: bool = false;   # put `label:` before each line
+    pub var label: string = "";        # the file name as printed; "" for standard input
+}
+
+pub class SearchResult {
+    pub let out: list[string];   # output lines, without line ends
+    pub let found: bool;         # a line was selected
+
+    new(out: list[string], found: bool) {
+        this.out = out;
+        this.found = found;
+    }
+}
+
+# Searches one input. `data` is its bytes; `lines` its text split at LF
+# (each line as stored, CR included), or [] to print lines decoded from
+# `data` (standard input). A line ends at LF; a CR before the LF is not
+# part of what is matched. A last line without LF counts.
+pub safe func search_input(edits s: Searcher, cfg: SearchConfig, data: bytes, lines: list[string]): SearchResult {
+    var out: list[string] = [];
+    var found = false;
+    let n = data.len();
+    var start = 0;
+    var index = 0;
+    while (start < n) {
+        var stop = start;
+        while (stop < n and data[stop] != 10) {
+            stop += 1;
+        }
+        var content_end = stop;
+        if (content_end > start and data[content_end - 1] == 13) {
+            content_end -= 1;
+        }
+        if (s.selects(data, start, content_end) != cfg.invert) {
+            found = true;
+            if (cfg.names_only) {
+                if (cfg.label.len() > 0) {
+                    out.push(cfg.label);
+                }
+                break;
+            }
+            var prefix = "";
+            if (cfg.show_name) {
+                prefix += cfg.label + ":";
+            }
+            if (cfg.numbers) {
+                prefix += str(index + 1) + ":";
+            }
+            if (cfg.offsets) {
+                prefix += str(start) + ":";
+            }
+            if (index < lines.len()) {
+                out.push(prefix + lines[index]);
+            } else {
+                out.push(prefix + data.slice(start, stop).decode());
+            }
+        }
+        start = stop + 1;
+        index += 1;
+    }
+    return SearchResult(out, found);
+}
+
+# Whether search strings read without /L or /R are regular expressions:
+# findstr decides from the first of them.
+func default_is_regex(strings: list[string]): bool {
+    return strings.len() > 0 and looks_like_regex(strings[0]);
+}
+
+# The search strings of the command line and the /G: files. Err carries
+# the message for a /G: file that cannot be read.
+pub func collect_strings(opts: Options): Result[list[SearchString], string] {
+    var out: list[SearchString] = [];
+    let forced = opts.mode != MODE_DEFAULT;
+    let as_regex = opts.mode == MODE_REGEX;
+    for (text in opts.literal_strings) {
+        out.push(search_string(text, as_regex));
+    }
+    if (opts.has_strings_arg) {
+        let words = split_search_strings(opts.strings_arg);
+        let regex = if (forced) { as_regex } else { default_is_regex(words) };
+        for (w in words) {
+            out.push(search_string(w, regex));
+        }
+    }
+    var from_files: list[string] = [];
+    for (name in opts.string_files) {
+        if (!list_file_exists(name)) {
+            return Err("FINDSTR: Cannot read strings from " + display_path(name));
+        }
+        for (line in read_list_file(name)) {
+            from_files.push(line);
+        }
+    }
+    let file_regex = if (forced) { as_regex } else { default_is_regex(from_files) };
+    for (line in from_files) {
+        out.push(search_string(line, file_regex));
+    }
+    return Ok(out);
+}
+
+# Prints the result of one input; true if it found something.
+func emit(result: SearchResult): bool {
+    for (line in result.out) {
+        println(line);
+    }
+    return result.found;
+}
+
+pub safe func run_findstr(opts: Options): int {
+    for (text in opts.ignored) {
+        printErr("FINDSTR: " + text + " ignored");
+    }
+
+    var strings: list[SearchString] = [];
+    match collect_strings(opts) {
+        Ok(collected) => {
+            strings = collected;
+        },
+        Err(msg) => {
+            printErr(msg);
+            return EXIT_ERROR;
+        },
+    }
+    let whole = opts.whole_line;
+    let built = build_searcher(strings, opts.ignore_case, opts.at_begin or whole, opts.at_end or whole);
+    if (built.is_err()) {
+        printErr(MSG_BAD_COMMAND_LINE);
+        return EXIT_ERROR;
+    }
+    let searcher = built.unwrap();
+
+    var specs: list[string] = [];
+    for (spec in opts.file_specs) {
+        specs.push(spec);
+    }
+    for (name in opts.list_files) {
+        if (!list_file_exists(name)) {
+            printErr("FINDSTR: Cannot read file list from " + display_path(name));
+            return EXIT_ERROR;
+        }
+        for (entry in read_list_file(name)) {
+            specs.push(entry);
+        }
+    }
+
+    let cfg = SearchConfig();
+    cfg.invert = opts.invert;
+    cfg.numbers = opts.numbers;
+    cfg.offsets = opts.offsets;
+    cfg.names_only = opts.names_only;
+
+    var found = false;
+    if (specs.len() == 0) {
+        let none: list[string] = [];
+        let data = readBytes(STDIN_PATH);
+        if (emit(search_input(edits: searcher, cfg, data, none))) {
+            found = true;
+        }
+        return if (found) { EXIT_FOUND } else { EXIT_NOT_FOUND };
+    }
+
+    cfg.show_name = shows_names(specs, opts.subdirs);
+    for (spec in specs) {
+        let paths = resolve_spec(spec, opts.subdirs);
+        if (paths.len() == 0) {
+            printErr("FINDSTR: Cannot open " + display_path(spec));
+            continue;
+        }
+        for (path in paths) {
+            if (!isFile(path)) {
+                printErr("FINDSTR: Cannot open " + display_path(path));
+                continue;
+            }
+            let data = readBytes(path);
+            if (opts.printable_only and has_control_bytes(data)) {
+                continue;
+            }
+            cfg.label = display_path(path);
+            let lines = readText(path).split("\n");
+            if (emit(search_input(edits: searcher, cfg, data, lines))) {
+                found = true;
+            }
+        }
+    }
+    return if (found) { EXIT_FOUND } else { EXIT_NOT_FOUND };
+}

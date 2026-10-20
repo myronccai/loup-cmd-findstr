@@ -1,28 +1,51 @@
 @mode(host.dual)
 
-from appinfo import (APP_NAME, APP_VERSION, APP_SUMMARY);
-from cli.args import (DEFAULT_GREETING);
+from appinfo import (APP_NAME, APP_VERSION);
 
+# The text of `findstr /?`: a short summary of the syntax, the switches and
+# the regular expressions, written for this project.
 pub func usage(): string {
     let lines = [
-        i"usage: {$ APP_NAME $} [OPTIONS] COMMAND [ARGS...]",
+        "Prints the lines of files (or of standard input) that contain a search string.",
         "",
-        APP_SUMMARY,
+        "FINDSTR [/B] [/E] [/L | /R] [/I] [/X] [/V] [/N] [/O] [/M] [/S] [/P] [/OFF[LINE]]",
+        "        [/C:string] [/G:file] [/F:file] [strings] [[path]filename ...]",
         "",
-        "Commands:",
-        "  hello [NAME]          Print a greeting (NAME defaults to 'world')",
-        "  help                  Show this help",
+        "  strings    Search strings separated by spaces: a line is printed if it",
+        "             contains any of them. Not given when /C: or /G: is used.",
+        "  filename   Files to search; * and ? select several. Without files,",
+        "             standard input is searched.",
+        "  /C:string  One search string, spaces included (repeatable).",
+        "  /G:file    Search strings from a file, one per line (/G:/ reads them",
+        "             from standard input).",
+        "  /F:file    File names from a file, one per line (/F:/ reads them from",
+        "             standard input).",
+        "  /L         Search strings are plain text.",
+        "  /R         Search strings are regular expressions.",
+        "  /I         Upper and lower case are the same.",
+        "  /B  /E     The match must be at the start / at the end of the line.",
+        "  /X         The match must be the whole line.",
+        "  /V         Print the lines that do not match instead.",
+        "  /N         Print the line number before each line.",
+        "  /O         Print the line's byte offset in its file before each line.",
+        "  /M         Print only the name of each file that has a match.",
+        "  /S         Search the files in the subdirectories as well.",
+        "  /P         Skip files that contain control characters.",
+        "  /OFF[LINE] Accepted; Linux has no offline attribute.",
         "",
-        "Options:",
-        i"  -g, --greeting TEXT   Greeting used by 'hello' (default: {$ DEFAULT_GREETING $})",
-        "      --shout           Print the greeting in upper case",
-        "  -v, --verbose         Print diagnostic messages to stderr",
-        "  -h, --help            Show this help and exit",
-        "  -V, --version         Show the version and exit",
+        "Regular expressions: . any character; x* any number of x (also . and",
+        "[class]); ^ and $ the start and end of the line; [abc] one of a, b, c;",
+        "[a-z] a range; [^abc] any other character; \\< and \\> the start and end of",
+        "a word; \\x the character x itself.",
+        "",
+        "Without /L or /R, /C: strings are plain text, and other search strings are",
+        "regular expressions if the first of them uses one of . * ^ $ [ \\< \\>.",
+        "",
+        "ERRORLEVEL: 0 a match was found, 1 none was, 2 an error.",
     ];
     return lines.join("\n");
 }
 
 pub func version_line(): string {
-    return i"{$ APP_NAME $} {$ APP_VERSION $}";
+    return i"{$ APP_NAME $} (loup-cmd-{$ APP_NAME $}) {$ APP_VERSION $}";
 }
