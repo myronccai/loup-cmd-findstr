@@ -1,7 +1,7 @@
 @mode(host.dual)
 
 # findstr's search strings: its small regular-expression dialect and its
-# literal strings, compiled to one form and matched by a matcher of its own
+# literal strings, compiled into a Matcher and matched by code of its own
 # (no system.regex).
 #
 # The dialect: `.` any character, `*` the previous item repeated (zero or
@@ -21,11 +21,12 @@
 # Runtime: host.dual. Compiled into the native binary build/findstr by `make
 # build`; `loup run source/main.loup` interprets the same code.
 #
-# Structure: item kinds and byte helpers; the Pattern class (its two searches:
-# search_plain for literal byte strings, search for everything else);
-# PatternBuilder, which collects items while compiling; character classes;
-# compile_regex and compile_literal; then the rules for reading search strings
-# (looks_like_regex, unescape_literal, split_search_strings).
+# Structure: item kinds and byte helpers; the Matcher interface (with a
+# default search_text) and its two final classes, LiteralMatcher for plain
+# byte strings and RegexMatcher for everything else; PatternBuilder, which
+# collects items while compiling and picks the class; character classes;
+# compile_regex and compile_literal; then the rules for reading search
+# strings (looks_like_regex, unescape_literal, split_search_strings).
 
 # Item kinds. The ones below K_BOL consume one byte.
 pub const K_CHAR: int = 0;
@@ -88,15 +89,100 @@ pub func is_word_byte(b: int): bool {
         or b == 95 or b >= 128;
 }
 
-# A compiled search string.
-pub class Pattern {
+# The text of one byte in describe(): itself when printable ASCII, else
+# `#` and its value.
+func byte_item(b: int): string {
+    return if (b > 32 and b < 127) { str(char.of(b)) } else { "#" + str(b) };
+}
+
+# A byte of the line, ASCII capitals folded under /I.
+func line_byte(data: bytes, at: int, icase: bool): int {
+    let b = data[at];
+    if (icase and b >= 65 and b <= 90) {
+        return b + 32;
+    }
+    return b;
+}
+
+# A compiled search string. PatternBuilder.build picks the class: a search
+# string of plain bytes (every literal, and a regular expression without
+# special characters) is a LiteralMatcher; anything else a RegexMatcher.
+pub interface Matcher {
+    # Whether the search string matches in the line `data[start:stop]`
+    # (without its line end). `from_start`: the match must begin at the
+    # start of the line (/B); `to_end`: it must finish at its end (/E).
+    func search(data: bytes, start: int, stop: int, from_start: bool, to_end: bool): bool;
+
+    # A readable form of the items, for tests: `a` for a byte (`#200` when
+    # not printable ASCII), `.`, `[97-122]`, `[^97-99]`, `^`, `$`, `\<`,
+    # `\>`, with `*` after starred items, separated by spaces.
+    func describe(): string;
+
+    # The same search in a line given as text (tests, and callers without
+    # bytes). search may be a `modifier` method, hence the safe block.
+    func search_text(line: string, from_start: bool, to_end: bool): bool {
+        let data = bytesFromInts(text_bytes(line));
+        var hit = false;
+        safe {
+            hit = this.search(data, 0, data.len(), from_start, to_end);
+        }
+        return hit;
+    }
+}
+
+# Plain bytes: compare them at each possible start.
+pub final class LiteralMatcher implements Matcher {
+    let chars: list[int];   # the bytes, ASCII letters folded under /I
+    let icase: bool;
+
+    new(chars: list[int], icase: bool) {
+        this.chars = chars;
+        this.icase = icase;
+    }
+
+    pub func search(data: bytes, start: int, stop: int, from_start: bool, to_end: bool): bool {
+        let m = this.chars.len();
+        var first = start;
+        var last = stop - m;
+        if (from_start and last > start) {
+            last = start;
+        }
+        if (to_end) {
+            first = stop - m;
+        }
+        if (first < start) {
+            return false;
+        }
+        # A differing byte moves on to the next start.
+        starts: for (s in first..(last + 1)) {
+            for (j in 0..m) {
+                if (line_byte(data, s + j, this.icase) != this.chars[j]) {
+                    continue starts;
+                }
+            }
+            return true;
+        }
+        return false;
+    }
+
+    pub func describe(): string {
+        var parts: list[string] = [];
+        for (b in this.chars) {
+            parts.push(byte_item(b));
+        }
+        return parts.join(" ");
+    }
+}
+
+# Items with classes, stars and assertions, matched with the set of items
+# reached along the line (see the top of this file).
+pub final class RegexMatcher implements Matcher {
     let kinds: list[int];
     let vals: list[int];           # the byte (K_CHAR) or class index (K_CLASS)
     let stars: list[bool];
     let classes: list[list[int]];  # lo, hi pairs
     let negated: list[bool];
     let icase: bool;               # fold ASCII letters in the line (/I)
-    let plain: bool;               # only K_CHAR items, none starred
     var reached: list[int];        # search state, reused from line to line
 
     new(kinds: list[int], vals: list[int], stars: list[bool], classes: list[list[int]], negated: list[bool], icase: bool) {
@@ -106,45 +192,27 @@ pub class Pattern {
         this.classes = classes;
         this.negated = negated;
         this.icase = icase;
-        var only_chars = true;
-        for (k in 0..kinds.len()) {
-            if (kinds[k] != K_CHAR or stars[k]) {
-                only_chars = false;
-            }
-        }
-        this.plain = only_chars;
         var state: list[int] = [];
-        for (k in 0..(kinds.len() + 1)) {
+        for (_ in 0..(kinds.len() + 1)) {
             state.push(-1);
         }
         this.reached = state;
     }
 
-    # The number of items.
-    pub func size(): int {
-        return this.kinds.len();
-    }
-
-    # A readable form of the items, for tests: `a` for a byte (`#200` when
-    # not printable ASCII), `.`, `[97-122]`, `[^97-99]`, `^`, `$`, `\<`,
-    # `\>`, with `*` after starred items, separated by spaces.
     pub func describe(): string {
         var parts: list[string] = [];
         for (k in 0..this.kinds.len()) {
             let kind = this.kinds[k];
             var piece = "";
             if (kind == K_CHAR) {
-                let b = this.vals[k];
-                piece = if (b > 32 and b < 127) { str(char.of(b)) } else { "#" + str(b) };
+                piece = byte_item(this.vals[k]);
             } else if (kind == K_ANY) {
                 piece = ".";
             } else if (kind == K_CLASS) {
                 let ranges = this.classes[this.vals[k]];
                 var members: list[string] = [];
-                var i = 0;
-                while (i < ranges.len()) {
+                for (var i = 0; i < ranges.len(); i += 2) {
                     members.push(str(ranges[i]) + "-" + str(ranges[i + 1]));
-                    i += 2;
                 }
                 piece = (if (this.negated[this.vals[k]]) { "[^" } else { "[" }) + members.join(",") + "]";
             } else if (kind == K_BOL) {
@@ -174,13 +242,11 @@ pub class Pattern {
         }
         let ranges = this.classes[this.vals[k]];
         var hit = false;
-        var i = 0;
-        while (i < ranges.len()) {
+        for (var i = 0; i < ranges.len(); i += 2) {
             if (b >= ranges[i] and b <= ranges[i + 1]) {
                 hit = true;
                 break;
             }
-            i += 2;
         }
         return hit != this.negated[this.vals[k]];
     }
@@ -200,52 +266,9 @@ pub class Pattern {
         return before and !after;
     }
 
-    func byte_at(data: bytes, at: int): int {
-        let b = data[at];
-        if (this.icase and b >= 65 and b <= 90) {
-            return b + 32;
-        }
-        return b;
-    }
-
-    # A pattern of plain bytes (every literal string): compare at each start.
-    func search_plain(data: bytes, start: int, stop: int, from_start: bool, to_end: bool): bool {
-        let m = this.kinds.len();
-        var first = start;
-        var last = stop - m;
-        if (from_start and last > start) {
-            last = start;
-        }
-        if (to_end) {
-            first = stop - m;
-        }
-        if (first < start) {
-            return false;
-        }
-        var s = first;
-        while (s <= last) {
-            var j = 0;
-            while (j < m and this.byte_at(data, s + j) == this.vals[j]) {
-                j += 1;
-            }
-            if (j == m) {
-                return true;
-            }
-            s += 1;
-        }
-        return false;
-    }
-
-    # Whether the pattern matches in the line `data[start:stop]` (without
-    # its line end). `from_start`: the match must begin at the start of the
-    # line (/B); `to_end`: it must finish at the end of the line (/E).
-    #
     # `reached[k] == at` means that item k is reached with the line read up
     # to byte `at`; `reached[size]` is the end of the pattern.
     pub modifier func search(data: bytes, start: int, stop: int, from_start: bool, to_end: bool): bool {
-        if (this.plain) {
-            return this.search_plain(data, start, stop, from_start, to_end);
-        }
         let p = this.kinds.len();
         for (k in 0..(p + 1)) {
             this.reached[k] = -1;
@@ -278,7 +301,7 @@ pub class Pattern {
             }
             # Read one byte. Backwards, so that each item is read before the
             # item in front of it marks it for the next position.
-            let b = this.byte_at(data, at);
+            let b = line_byte(data, at, this.icase);
             k = p - 1;
             while (k >= 0) {
                 if (this.reached[k] == at and this.kinds[k] < K_BOL and this.accepts(k, b)) {
@@ -338,8 +361,19 @@ class PatternBuilder {
         this.stars[this.stars.len() - 1] = true;
     }
 
-    pub func build(icase: bool): Pattern {
-        return Pattern(this.kinds, this.vals, this.stars, this.classes, this.negated, icase);
+    # A LiteralMatcher when every item is an unstarred byte, else a
+    # RegexMatcher.
+    pub func build(icase: bool): Matcher {
+        var plain = true;
+        for (k in 0..this.kinds.len()) {
+            if (this.kinds[k] != K_CHAR or this.stars[k]) {
+                plain = false;
+            }
+        }
+        if (plain) {
+            return LiteralMatcher(this.vals, icase);
+        }
+        return RegexMatcher(this.kinds, this.vals, this.stars, this.classes, this.negated, icase);
     }
 }
 
@@ -429,7 +463,7 @@ safe func parse_class(edits b: PatternBuilder, codes: list[int], start: int, ica
 
 # Compiles a findstr regular expression. Err("") when it is not valid (an
 # unclosed `[`).
-pub safe func compile_regex(source: string, icase: bool): Result[Pattern, string] {
+pub safe func compile_regex(source: string, icase: bool): Result[Matcher, string] {
     let codes = code_points(source);
     let n = codes.len();
     let b = PatternBuilder();
@@ -478,7 +512,7 @@ pub safe func compile_regex(source: string, icase: bool): Result[Pattern, string
 }
 
 # Compiles a literal search string (already unescaped): its bytes.
-pub safe func compile_literal(text: string, icase: bool): Pattern {
+pub safe func compile_literal(text: string, icase: bool): Matcher {
     let b = PatternBuilder();
     for (c in code_points(text)) {
         b.add_char(c, icase);
@@ -535,11 +569,6 @@ pub func unescape_literal(text: string): string {
 # The search strings of the strings argument: separated by spaces, empty
 # ones dropped (`"hello  there"` is `hello` or `there`).
 pub func split_search_strings(text: string): list[string] {
-    var out: list[string] = [];
-    for (part in text.split(" ")) {
-        if (part.len() > 0) {
-            out.push(part);
-        }
-    }
+    let out: list[string] = [part for part in text.split(" ") if part.len() > 0];
     return out;
 }

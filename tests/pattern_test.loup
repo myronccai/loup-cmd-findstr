@@ -9,17 +9,13 @@
 # test per `func test_*()`. It is not part of the binary.
 
 from debug.assert import (expect, expectEq);
+from core.random import (Random);
+from system.regex import (Regex);
 from commands.pattern import (compile_regex, compile_literal, text_bytes, utf8_bytes, fold_byte,
     is_word_byte, looks_like_regex, unescape_literal, split_search_strings);
 
 func search_line(pattern: string, line: string, icase: bool, from_start: bool, to_end: bool): bool {
-    let p = compile_regex(pattern, icase).unwrap();
-    let data = bytesFromInts(text_bytes(line));
-    var hit = false;
-    safe {
-        hit = p.search(data, 0, data.len(), from_start, to_end);
-    }
-    return hit;
+    return compile_regex(pattern, icase).unwrap().search_text(line, from_start, to_end);
 }
 
 func finds(pattern: string, line: string): bool {
@@ -133,13 +129,19 @@ func test_bytes(): void {
 func test_literal(): void {
     let p = compile_literal("a.b*", false);
     expect(p.describe() == "a . b *", "no special characters");
-    let data = bytesFromInts(text_bytes("xA.B*y"));
     let q = compile_literal("a.b*", true);
-    var hit = false;
-    safe {
-        hit = q.search(data, 0, data.len(), false, false);
-    }
-    expect(hit, "literal, /I");
+    expect(q.search_text("xA.B*y", false, false), "literal, /I");
+    expect(q.search_text("A.B*", true, true), "the whole line");
+    expect(!q.search_text("xa.b*", true, false), "not at the start (/B)");
+    expect(!q.search_text("a.b*x", false, true), "not at the end (/E)");
+    expect(compile_literal("", false).search_text("", false, false), "the empty string");
+}
+
+# A regular expression of plain bytes compiles to the same matcher as a
+# literal: both describe the same bytes.
+func test_plain_regex(): void {
+    expect(describe("abc") == "a b c", "plain bytes");
+    expect(finds("bc", "abcd") and !finds("bd", "abcd"), "found where it is");
 }
 
 func test_looks_like_regex(): void {
@@ -167,4 +169,54 @@ func test_split_search_strings(): void {
     expectEq(words.len(), 2, "two strings");
     expect(words[0] == "hello" and words[1] == "there", "the strings");
     expectEq(split_search_strings("one").len(), 1, "one string");
+}
+
+# system.regex (Stage0 here) as an oracle: random patterns in the part of
+# findstr's dialect that means the same in both (bytes, `.`, classes, `*`,
+# `^`, `$`) against random lines must give the same answers.
+func random_pattern(edits rng: Random): string {
+    let atoms = ["a", "b", "c", ".", "[ab]", "[^a]", "[a-b]", "[^bc]"];
+    var parts: list[string] = [];
+    var n = 0;
+    safe {
+        if (rng.intRange(0, 4) == 0) {
+            parts.push("^");
+        }
+        n = rng.intRange(1, 5);
+        for (_ in 0..n) {
+            parts.push(atoms[rng.intRange(0, atoms.len())]);
+            if (rng.intRange(0, 3) == 0) {
+                parts.push("*");
+            }
+        }
+        if (rng.intRange(0, 4) == 0) {
+            parts.push("$");
+        }
+    }
+    return parts.join("");
+}
+
+func random_line(edits rng: Random): string {
+    var out: list[string] = [];
+    safe {
+        let n = rng.intRange(0, 7);
+        for (_ in 0..n) {
+            out.push(["a", "b", "c", "d"][rng.intRange(0, 4)]);
+        }
+    }
+    return out.join("");
+}
+
+func test_against_system_regex(): void {
+    var rng = Random(2026);
+    for (_ in 0..150) {
+        let pattern = random_pattern(edits: rng);
+        let oracle = Regex(pattern);
+        let matcher = compile_regex(pattern, false).unwrap();
+        for (_ in 0..8) {
+            let line = random_line(edits: rng);
+            expect(matcher.search_text(line, false, false) == oracle.isMatch(line),
+                "/" + pattern + "/ on '" + line + "'");
+        }
+    }
 }

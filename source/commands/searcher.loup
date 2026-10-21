@@ -8,7 +8,7 @@
 # is a class, built once and reused for every line: its patterns keep their
 # match state between calls (see commands/pattern.loup).
 
-from commands.pattern import (Pattern, compile_regex, compile_literal, unescape_literal, text_bytes);
+from commands.pattern import (Matcher, compile_regex, compile_literal, unescape_literal, text_bytes);
 
 # One search string and how to read it.
 pub class SearchString {
@@ -26,11 +26,11 @@ pub func search_string(text: string, regex: bool): SearchString {
 }
 
 pub class Searcher {
-    let patterns: list[Pattern];
+    let patterns: list[Matcher];
     let from_start: bool;          # /B (or /X)
     let to_end: bool;              # /E (or /X)
 
-    new(patterns: list[Pattern], from_start: bool, to_end: bool) {
+    new(patterns: list[Matcher], from_start: bool, to_end: bool) {
         this.patterns = patterns;
         this.from_start = from_start;
         this.to_end = to_end;
@@ -61,7 +61,7 @@ pub class Searcher {
 # Compiles the search strings. `from_start` and `to_end` come from /B, /E
 # and /X. Err(text) names a regular expression that cannot be compiled.
 pub func build_searcher(strings: list[SearchString], icase: bool, from_start: bool, to_end: bool): Result[Searcher, string] {
-    var patterns: list[Pattern] = [];
+    var patterns: list[Matcher] = [];
     for (s in strings) {
         if (s.regex) {
             let compiled = compile_regex(s.text, icase);
