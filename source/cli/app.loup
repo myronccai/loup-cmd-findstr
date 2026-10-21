@@ -1,5 +1,12 @@
 @mode(host.dual)
 
+# Top level of findstr: parse the arguments, handle /? and --version, run
+# the search and turn the outcome into findstr's ERRORLEVEL.
+#
+# Runtime: host.dual. Compiled into the native binary build/findstr by `make
+# build`; `loup run source/main.loup` interprets the same code. The unit tests
+# call run() directly.
+
 from appinfo import (EXIT_FOUND, EXIT_ERROR);
 from cli.args import (parse_args);
 from cli.usage import (usage, version_line);

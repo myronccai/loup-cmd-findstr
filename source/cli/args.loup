@@ -8,6 +8,9 @@
 # Operands: without /C: or /G:, the first one is the search strings
 # (separated by spaces) and the rest are file names; with /C: or /G:, every
 # operand is a file name.
+#
+# Runtime: host.dual. Compiled into the native binary build/findstr by `make
+# build`; `loup run source/main.loup` interprets the same code.
 
 from win.switches import (SwitchSpec, flag, required_value, parse_switches);
 

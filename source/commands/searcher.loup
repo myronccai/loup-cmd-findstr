@@ -2,6 +2,11 @@
 
 # Which lines a set of search strings selects: a line is selected when any
 # search string matches it (before /V is applied).
+#
+# Runtime: host.dual. Compiled into the native binary build/findstr by `make
+# build`; `loup run source/main.loup` interprets the same code. The Searcher
+# is a class, built once and reused for every line: its patterns keep their
+# match state between calls (see commands/pattern.loup).
 
 from commands.pattern import (Pattern, compile_regex, compile_literal, unescape_literal, text_bytes);
 

@@ -1,6 +1,11 @@
 @mode(host.dual)
 
-# Sets of search strings: any of them selects a line; /B, /E, /X, /I.
+# Unit tests for sets of search strings (commands.searcher): any of them
+# selects a line; /B, /E, /X, /I.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this file
+# with Stage0 (`loup-bootstrap test --no-parallel`, source/ on LOUPPATH), one
+# test per `func test_*()`. It is not part of the binary.
 
 from debug.assert import (expect);
 from commands.searcher import (SearchString, Searcher, search_string, build_searcher);

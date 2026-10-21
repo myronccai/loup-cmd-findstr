@@ -17,6 +17,15 @@
 # items reached along the line one byte at a time, so a search costs at
 # most (items x bytes) steps whatever the pattern, and allocates nothing.
 # See specs/findstr/design.md.
+#
+# Runtime: host.dual. Compiled into the native binary build/findstr by `make
+# build`; `loup run source/main.loup` interprets the same code.
+#
+# Structure: item kinds and byte helpers; the Pattern class (its two searches:
+# search_plain for literal byte strings, search for everything else);
+# PatternBuilder, which collects items while compiling; character classes;
+# compile_regex and compile_literal; then the rules for reading search strings
+# (looks_like_regex, unescape_literal, split_search_strings).
 
 # Item kinds. The ones below K_BOL consume one byte.
 pub const K_CHAR: int = 0;

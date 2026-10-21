@@ -2,6 +2,9 @@
 
 # Where findstr's input comes from: file specs (wildcards, /S), the list
 # files of /G: and /F:, and standard input.
+#
+# Runtime: host.dual. Compiled into the native binary build/findstr by `make
+# build`; `loup run source/main.loup` interprets the same code.
 
 from io.fs import (isFile);
 from win.paths import (fs_path, parent_dir, base_name);

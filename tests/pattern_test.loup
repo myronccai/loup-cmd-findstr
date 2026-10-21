@@ -1,7 +1,12 @@
 @mode(host.dual)
 
-# findstr's regular expressions and literal strings: compiling, matching
-# and the rules for reading search strings.
+# Unit tests for findstr's regular expressions and literal strings
+# (commands.pattern): compiling, matching and the rules for reading search
+# strings.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this file
+# with Stage0 (`loup-bootstrap test --no-parallel`, source/ on LOUPPATH), one
+# test per `func test_*()`. It is not part of the binary.
 
 from debug.assert import (expect, expectEq);
 from commands.pattern import (compile_regex, compile_literal, text_bytes, utf8_bytes, fold_byte,

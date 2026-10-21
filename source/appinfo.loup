@@ -1,7 +1,11 @@
 @mode(host.dual)
 
-# Application identity. Keep APP_NAME and APP_VERSION in step with `name`
-# and `version` in package.lppkg.
+# Application identity for findstr: name, version, summary and the exit
+# statuses (findstr's ERRORLEVELs). Keep APP_NAME and APP_VERSION in step
+# with `name` and `version` in package.lppkg.
+#
+# Runtime: host.dual. Constants only. Compiled into build/findstr by `make
+# build`; `loup run source/main.loup` interprets the same code.
 
 pub const APP_NAME: string = "findstr";
 pub const APP_VERSION: string = "0.1.0";

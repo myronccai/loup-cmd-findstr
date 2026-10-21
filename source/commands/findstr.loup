@@ -3,6 +3,14 @@
 # findstr itself: collect the search strings, decide literal or regular
 # expression, walk the inputs and print the selected lines. search_input
 # is pure (it returns the output lines); only run_findstr prints.
+#
+# Runtime: host.dual. Compiled into the native binary build/findstr by `make
+# build`; `loup run source/main.loup` interprets the same code.
+#
+# Structure: SearchConfig and SearchResult; search_input, which searches one
+# input; collect_strings, which gathers the search strings and decides literal
+# or regular expression; and run_findstr, which builds one Searcher, then
+# searches standard input or each file in turn.
 
 from io.fs import (isFile);
 from appinfo import (EXIT_FOUND, EXIT_NOT_FOUND, EXIT_ERROR);
@@ -42,6 +50,10 @@ pub safe func search_input(edits s: Searcher, cfg: SearchConfig, data: bytes, li
     var out: list[string] = [];
     var found = false;
     let n = data.len();
+    # Lines are matched as [start, content_end) byte ranges of `data`, so
+    # nothing is allocated per line; a selected line is printed from the
+    # matching piece of `lines` when there is one, which keeps the file's
+    # bytes exactly.
     var start = 0;
     var index = 0;
     while (start < n) {

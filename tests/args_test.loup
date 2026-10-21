@@ -1,5 +1,13 @@
 @mode(host.dual)
 
+# Unit tests for findstr's argument parsing (cli.args): strings and files,
+# flags, clustered switches, /L and /R, /C: and /G:, paths, the ignored /A
+# and /D, and bad command lines.
+#
+# Runtime: host.dual, run by the test runner: `make test` interprets this file
+# with Stage0 (`loup-bootstrap test --no-parallel`, source/ on LOUPPATH), one
+# test per `func test_*()`. It is not part of the binary.
+
 from debug.assert import (expect, expectEq);
 from cli.args import (parse_args, MSG_BAD_COMMAND_LINE, MODE_DEFAULT, MODE_LITERAL, MODE_REGEX);
 
